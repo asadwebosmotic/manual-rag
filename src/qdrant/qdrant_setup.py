@@ -107,8 +107,7 @@ Query:
 
 Context:
 {context}
-<end_of_turn>
-<start_of_turn>model"""
+<end_of_turn>"""
 
 # === Generate Answer ===
 input_ids = tokenizer(prompt, return_tensors="pt").to(phi_model.device)

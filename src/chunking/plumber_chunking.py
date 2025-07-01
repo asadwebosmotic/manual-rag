@@ -167,4 +167,3 @@ def chunk_pdfplumber_parsed_data(pages: List[Dict]) -> List[Dict]:
             logger.info(f"Created chunk: {chunk['page_content'][:50]}... with metadata: {chunk['metadata']}")
 
     return deduped_chunks
-

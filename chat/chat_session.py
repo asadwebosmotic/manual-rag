@@ -1,3 +1,4 @@
+'''craeting a chat session class to store the chat history'''
 class ChatSession:
     def __init__(self):
         self.history = []

@@ -1,15 +1,9 @@
 fastapi
 uvicorn
-pinecone
 langchain
 langchain_google_genai
 pydantic-settings
 sentence-transformers
 python-dotenv
-tika
-unstructured
 pdfplumber
-unstructured-client
-spacy
-weaviate-
 qdrant-client
