@@ -1,15 +1,11 @@
 import logging
 import os
 import uuid
+from typing import List
 from data_ingestion.parse_and_chunk import parse_file, chunk_pdfplumber_parsed_data
 from qdrant_client import QdrantClient
-from llm.llm_operations import GeminiChat
 from qdrant_client.http.models import Distance, VectorParams, PointStruct
 from sentence_transformers import SentenceTransformer, CrossEncoder
-from config import settings
-from fastapi import APIRouter, HTTPException
-
-router = APIRouter()
 
 # === Configure logging ===
 logging.basicConfig(level=logging.INFO)
@@ -19,7 +15,6 @@ logger = logging.getLogger(__name__)
 client = QdrantClient(host = "localhost", port = 6333)
 embed_model = SentenceTransformer("intfloat/e5-base-v2")
 reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
-model = GeminiChat()
 
 # === Recreate collection if not exists ===
 if not client.collection_exists("rag_chunks"):
@@ -28,33 +23,43 @@ if not client.collection_exists("rag_chunks"):
         vectors_config=VectorParams(size=768, distance=Distance.COSINE)
 )
 
-# === Parse + Chunk PDF ===
-script_dir = os.path.dirname(os.path.abspath(__file__))
-pdf_path = os.path.join(script_dir, "..", "chunking", "tables.pdf")
-pages = parse_file(pdf_path)
-chunks = chunk_pdfplumber_parsed_data(pages)
+# === Core Function to Embed and Store PDF Data ===
+def embed_and_store_pdf(pdf_path: str) -> List[PointStruct]:
+    """
+    Parses, chunks, embeds, and stores the given PDF into Qdrant.
+    
+    Args:
+        pdf_path (str): Absolute or relative path to the PDF file.
 
-# === Create Embeddings ===
-data = [chunk.get("page_content", "") for chunk in chunks]
-embeddings = embed_model.encode(data).tolist()
+    Returns:
+        List[PointStruct]: Points that were embedded and stored.
+    """
+    pages = parse_file(pdf_path)
+    chunks = chunk_pdfplumber_parsed_data(pages)
 
-# === Build + Upsert Points to Qdrant ===
-points = []
-for emb, chunk, text in zip(embeddings, chunks, data):
-    if text.strip():
-        metadata = chunk.get("metadata", {})
-        point = PointStruct(
-            id=str(uuid.uuid4()),
-            vector=emb,
-            payload={
-                "text": text,
-                "page": metadata.get("page_number", 1),
-                "source": os.path.basename(metadata.get("source", "tables.pdf")),
-                "type": metadata.get("type", "text")
-            }
-        )
-        points.append(point)
-        logger.info(f"Upserted point: {text[:50]}... with metadata: {point.payload}")
+    # === Create Embeddings ===
+    data = [chunk.get("page_content", "") for chunk in chunks]
+    embeddings = embed_model.encode(data).tolist()
 
-client.upsert(collection_name='rag_chunks', points=points)
-print("✅ All chunks uploaded to Qdrant.")
+    # === Build + Upsert Points to Qdrant ===
+    points = []
+    for emb, chunk, text in zip(embeddings, chunks, data):
+        if text.strip():
+            metadata = chunk.get("metadata", {})
+            point = PointStruct(
+                id=str(uuid.uuid4()),
+                vector=emb,
+                payload={
+                    "text": text,
+                    "page": metadata.get("page_number", 1),
+                    "source": os.path.basename(metadata.get("source", "tables.pdf")),
+                    "type": metadata.get("type", "text")
+                }
+            )
+            points.append(point)
+            logger.info(f"Embedded chunk: {text[:50]}... with metadata: {point.payload}")
+
+    client.upsert(collection_name='rag_chunks', points=points)
+    logger.info(f"📦 Stored {len(points)} chunks from {os.path.basename(pdf_path)} into Qdrant.")
+
+    return points  # Useful for testing or future chaining (e.g. rerank preview)
