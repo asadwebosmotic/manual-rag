@@ -5,7 +5,7 @@ from typing import List
 from data_ingestion.parse_and_chunk import parse_file, chunk_pdfplumber_parsed_data
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import Distance, VectorParams, PointStruct
-from sentence_transformers import SentenceTransformer, CrossEncoder
+from sentence_transformers import SentenceTransformer
 
 # === Configure logging ===
 logging.basicConfig(level=logging.INFO)
@@ -14,7 +14,6 @@ logger = logging.getLogger(__name__)
 # === Initialize Qdrant client and models ===
 client = QdrantClient(host = "localhost", port = 6333)
 embed_model = SentenceTransformer("intfloat/e5-base-v2")
-reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
 
 # === Recreate collection if not exists ===
 if not client.collection_exists("rag_chunks"):
@@ -24,9 +23,9 @@ if not client.collection_exists("rag_chunks"):
 )
 
 # === Core Function to Embed and Store PDF Data ===
-def embed_and_store_pdf(pdf_path: str) -> List[PointStruct]:
+def embed_and_store_pdf(chunks: List[dict]) -> List[PointStruct]:
     """
-    Parses, chunks, embeds, and stores the given PDF into Qdrant.
+    embeds and stores the given PDF into Qdrant.
     
     Args:
         pdf_path (str): Absolute or relative path to the PDF file.
@@ -34,8 +33,6 @@ def embed_and_store_pdf(pdf_path: str) -> List[PointStruct]:
     Returns:
         List[PointStruct]: Points that were embedded and stored.
     """
-    pages = parse_file(pdf_path)
-    chunks = chunk_pdfplumber_parsed_data(pages)
 
     # === Create Embeddings ===
     data = [chunk.get("page_content", "") for chunk in chunks]
@@ -60,6 +57,6 @@ def embed_and_store_pdf(pdf_path: str) -> List[PointStruct]:
             logger.info(f"Embedded chunk: {text[:50]}... with metadata: {point.payload}")
 
     client.upsert(collection_name='rag_chunks', points=points)
-    logger.info(f"📦 Stored {len(points)} chunks from {os.path.basename(pdf_path)} into Qdrant.")
+    logger.info(f"📦 Stored {len(points)} chunks into Qdrant.")
 
     return points  # Useful for testing or future chaining (e.g. rerank preview)

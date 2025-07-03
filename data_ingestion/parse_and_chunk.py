@@ -1,3 +1,4 @@
+'''take the pdf, parses the data with pdfplumber, meke chunks according to the text-table logic, remove duplicated chunks and return deduplicated chunks'''
 import os
 import re
 from typing import List, Dict

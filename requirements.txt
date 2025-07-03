@@ -1,9 +1,10 @@
 fastapi
 uvicorn
 langchain
-langchain_google_genai
+google-generativeai
 pydantic-settings
 sentence-transformers
 python-dotenv
 pdfplumber
 qdrant-client
+python-multipart
