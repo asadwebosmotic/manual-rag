@@ -4,12 +4,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, Dict
 import os
 from data_ingestion.parse_and_chunk import parse_file, chunk_pdfplumber_parsed_data
-from data_ingestion.embed_and_store import embed_and_store_pdf
+from data_ingestion.embed_and_store import embed_and_store_pdf, embed_model
 from chat.chat_session import SlidingWindowSession
 from llm.llm_operations import GeminiChat
 from qdrant_client import QdrantClient
 from sentence_transformers import SentenceTransformer, CrossEncoder
-from qdrant_client.http.models import Filter, FieldCondition, MatchValue
+from qdrant_client.http.models import Filter, FieldCondition, MatchValue, PointsSelector
 import threading
 import uuid
 
@@ -17,17 +17,10 @@ app = FastAPI(title="RAG Chat Bot with CRUD operation API",
               description="API for uploading pdf files in Qdrant DB that shows chunks, Gemini 2.5 flash LLm powered chat bot.",
               version="1.0.0")
 
-embed_model = SentenceTransformer('intfloat/e5-base-v2')
 reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
-qdrant_client = QdrantClient(host="localhost", port=6333)  # Adjust as needed
+qdrant_client = QdrantClient(host="localhost", port=6333) 
 session_memory: Dict[str, SlidingWindowSession] = {}
 session_lock = threading.Lock()  # Thread-safe session management
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize resources on app startup."""
-    # Any additional startup logic can go here
-    pass
 
 app.add_middleware(
     CORSMiddleware,
@@ -93,14 +86,25 @@ async def chat_with_llm(user_msg: str, request: Request, pdf_name: Optional[str]
             with_payload=True,
             query_filter=qdrant_filter
         )
-
-        # Rerank results
-        context = None
+        top_chunks = []
+        references = []
+        context = ""
+        # Rerank results if any
         if results:
-            pairs = [(user_msg, r.payload['text']) for r in results]
+            pairs = [(user_msg, r.payload["text"]) for r in results]
             scores = reranker.predict(pairs)
             ranked = sorted(zip(results, scores), key=lambda x: x[1], reverse=True)
-            top_chunks = [r.payload['text'] for r, _ in ranked[:5]]
+            
+            Threshold = 0.3
+            for (r, score) in ranked[:5]:
+                if score < Threshold:
+                    continue
+                text = r.payload["text"]
+                source = r.payload.get("source", "unknown_pdf")
+                page = r.payload.get("page", "unknown_page")
+                top_chunks.append(f"{text}\n(Source: {source}, Page: {page})")
+                references.append(f"{source} (Page {page})")
+
             context = "\n\n".join(top_chunks)
 
         # Generate response
@@ -115,7 +119,10 @@ async def chat_with_llm(user_msg: str, request: Request, pdf_name: Optional[str]
         with session_lock:
             session.add_turn(user_msg, response)
 
-        return {"response": response.strip()}
+        return {
+            "response": response.strip(),
+            "source": references
+            }
 
     except ValueError as ve:
         raise HTTPException(status_code=400, detail=str(ve))
@@ -144,20 +151,68 @@ async def list_pdfs():
 
 # --- 3. Delete PDFs in DB ---
 @app.delete("/pdfs/{pdf_name}")
-async def delete_pdf(pdf_name: str):
+async def delete_pdf(pdf_name: str) -> Dict[str, str]:
+    """
+    Delete a PDF from local storage and its associated chunks from Qdrant.
+    
+    Args:
+        pdf_name: Name of the PDF file to delete (e.g., 'document.pdf').
+    
+    Returns:
+        Dict with a message indicating the result and number of chunks deleted.
+    
+    Raises:
+        HTTPException: If deletion fails or the PDF/chunks are not found.
+    """
     try:
-        # Delete all points with this source
-        qdrant_client.delete(
-            collection_name="rag_chunks",
-            points_selector=Filter(must=[FieldCondition(key="source", match=MatchValue(value=pdf_name))])
-        )
-        # Optionally, delete the file from disk
+        # Normalize pdf_name (remove path prefixes, ensure consistent extension)
+        pdf_name = os.path.basename(pdf_name.strip())
+        if not pdf_name:
+            raise HTTPException(status_code=400, detail="Invalid PDF name")
+
+        # Check if PDF exists in local storage
         file_path = os.path.join(UPLOAD_DIR, pdf_name)
-        if os.path.exists(file_path):
+        file_exists = os.path.exists(file_path)
+
+        # Check if chunks exist in Qdrant
+        search_result = qdrant_client.scroll(
+            collection_name="rag_chunks",
+            scroll_filter=Filter(must=[FieldCondition(key="source", match=MatchValue(value=pdf_name))]),
+            limit=1  # Just check if any points exist
+        )
+        chunks_exist = len(search_result[0]) > 0
+
+        if not file_exists and not chunks_exist:
+            raise HTTPException(status_code=404, detail=f"No PDF or chunks found for: {pdf_name}")
+
+        # Delete chunks from Qdrant
+        deleted_count = 0
+        if chunks_exist:
+            delete_response = qdrant_client.delete(
+                collection_name="rag_chunks",
+                points_selector=Filter(must=[FieldCondition(key="source", match=MatchValue(value=pdf_name))])
+            )
+            # Qdrant doesn't return deleted count directly, so we estimate by re-checking
+            post_delete_check = qdrant_client.scroll(
+                collection_name="rag_chunks",
+                scroll_filter=Filter(must=[FieldCondition(key="source", match=MatchValue(value=pdf_name))]),
+                limit=1
+            )
+            deleted_count = "unknown" if post_delete_check[0] else "all"
+
+        # Delete file from local storage if it exists
+        if file_exists:
             os.remove(file_path)
-        return {"message": f"Deleted PDF and its chunks: {pdf_name}"}
+
+        return {
+            "message": f"Successfully deleted PDF '{pdf_name}' from local storage and its chunks from Qdrant",
+            "chunks_deleted": str(deleted_count)
+        }
+
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=f"Invalid input: {str(ve)}")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete PDF: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete PDF or chunks: {str(e)}")
 
 # --- 4. Global error handler ---
 @app.exception_handler(Exception)

@@ -10,9 +10,15 @@ class GeminiChat:
             genai.configure(api_key=settings.GEMINI_API_KEY)
             GeminiChat._model = genai.GenerativeModel(model_name)
         self.model = GeminiChat._model
-        self.prompt_template = """You are a helpful assistant.
-        Use the following document context and chat history to answer the user question accurately.
-        You must rpely general knowledge based questions in fun and interactively engaging way.
+        self.prompt_template = """You are a helpful, smart and professional assistant.
+        - Use the document context and chat history to answer the user's question in a clearly structured way. 
+        - Respond in fluent, natural English, with no Markdown formatting, no newlines, no bolding, and no bullet points.
+        - Keep your reply concise, neatly structured into 1-3 natural paragraphs.
+        - The tone should be friendly and engaging, but clean and professional.
+        
+        If no document context is provided, answer using your general knowledge in a similarly clean and structured way with wit and genz like cool touch.
+
+        ---
         Context:
         {context}
 

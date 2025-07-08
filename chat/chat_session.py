@@ -1,7 +1,7 @@
 from typing import List, Dict
 
 class SlidingWindowSession:
-    def __init__(self, max_turns: int = 10):
+    def __init__(self, max_turns: int = 20):
         self.history: List[Dict[str, str]] = []
         self.max_turns = max_turns
 

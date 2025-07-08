@@ -2,7 +2,6 @@ import logging
 import os
 import uuid
 from typing import List
-from data_ingestion.parse_and_chunk import parse_file, chunk_pdfplumber_parsed_data
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import Distance, VectorParams, PointStruct
 from sentence_transformers import SentenceTransformer
