@@ -8,8 +8,9 @@ from data_ingestion.embed_and_store import embed_and_store_pdf, embed_model
 from chat.chat_session import SlidingWindowSession
 from llm.llm_operations import GeminiChat
 from qdrant_client import QdrantClient
-from sentence_transformers import SentenceTransformer, CrossEncoder
-from qdrant_client.http.models import Filter, FieldCondition, MatchValue, PointsSelector
+from sentence_transformers import CrossEncoder
+from qdrant_client.http.models import Filter, FieldCondition, MatchValue, PointStruct
+from pathlib import Path
 import threading
 import uuid
 
@@ -40,16 +41,40 @@ qdrant_client = QdrantClient(host="localhost", port=6333)
 @app.post("/upload_pdf/")
 async def upload_pdf(file: UploadFile = File(...)):
     try:
-        if not file.filename.lower().endswith(".pdf"): #validate if the uploaded file is pdf
-            raise HTTPException(status_code=400, detail="Only PDF files are supported.") #if not pdf it will throw error with msg
+        if not file.filename.lower().endswith(".pdf"):
+            raise HTTPException(status_code=400, detail="Only PDF files are supported.")
         file_path = os.path.join(UPLOAD_DIR, file.filename)
+        Path(UPLOAD_DIR).mkdir(exist_ok=True)
         with open(file_path, "wb") as f:
             f.write(await file.read())
+        
         # Parse and chunk
         pages = parse_file(file_path)
         chunks = chunk_pdfplumber_parsed_data(pages)
-        stored_file = embed_and_store_pdf(chunks)
-        return {"filename": file.filename, "chunks": chunks}
+        
+        # Embed and store in Qdrant
+        points = []
+        for chunk in chunks:
+            vector = embed_model.encode(chunk["page_content"]).tolist()
+            point = PointStruct(
+                id=str(uuid.uuid4()),
+                vector=vector,
+                payload={
+                    "text": chunk["page_content"],
+                    "source": chunk["metadata"]["source"],
+                    "page": chunk["metadata"]["page_number"],
+                    "type": chunk["metadata"]["type"]
+                }
+            )
+            points.append(point)
+        qdrant_client.upsert(collection_name="rag_chunks", points=points)
+        
+        return {
+            "filename": file.filename,
+            "chunks": chunks,
+            "message": f"Successfully uploaded and processed {file.filename}",
+            "chunks_stored": len(points)
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to process PDF: {str(e)}")
 
@@ -64,7 +89,7 @@ async def chat_with_llm(user_msg: str, request: Request, pdf_name: Optional[str]
         
         # Thread-safe session access
         with session_lock:
-            session = session_memory.setdefault(session_id, SlidingWindowSession(max_turns=10))
+            session = session_memory.setdefault(session_id, SlidingWindowSession(max_turns=20))
 
         # Validate input
         if not user_msg.strip():
@@ -134,6 +159,12 @@ async def chat_with_llm(user_msg: str, request: Request, pdf_name: Optional[str]
 # --- 3. List PDFs in DB ---
 @app.get("/pdfs/")
 async def list_pdfs():
+    '''Gets the name of Pdf files uploaded and stored in qdrant db.
+
+    Args:  None.
+
+    Return: Dict of list of pdf files.
+    '''
     try:
         res = qdrant_client.scroll(
             collection_name="rag_chunks",
