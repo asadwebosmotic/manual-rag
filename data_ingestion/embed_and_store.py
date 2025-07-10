@@ -48,12 +48,12 @@ def embed_and_store_pdf(chunks: List[dict]) -> List[PointStruct]:
                 payload={
                     "text": text,
                     "page": metadata.get("page_number", 1),
-                    "source": os.path.basename(metadata.get("source", "tables.pdf")),
+                    "source": os.path.basename(metadata.get("source", "unknown")),
                     "type": metadata.get("type", "text")
                 }
             )
             points.append(point)
-            logger.info(f"Embedded chunk: {text[:50]}... with metadata: {point.payload}")
+            logger.info(f"Embedded chunk: {text[:100]}... with metadata: {point.payload}")
 
     client.upsert(collection_name='rag_chunks', points=points)
     logger.info(f"📦 Stored {len(points)} chunks into Qdrant.")

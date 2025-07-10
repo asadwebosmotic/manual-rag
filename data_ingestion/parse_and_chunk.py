@@ -1,16 +1,16 @@
 import os
-import re
+import re #regex
 from typing import List, Dict
 import pdfplumber
-from hashlib import md5
-import logging
+from hashlib import md5 #hashing
+import logging # to see what is going on
 from langchain_community.document_loaders import PDFPlumberLoader
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def parse_file(filepath: str) -> List[Dict]:
+def parse_file(filepath: str) -> List[Dict]: # List of parsed pages(text+tables+metadata)
     if os.path.splitext(filepath)[1].lower() != ".pdf":
         raise ValueError("Unsupported file type")
 

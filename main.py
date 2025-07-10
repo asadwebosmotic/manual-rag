@@ -13,6 +13,11 @@ from qdrant_client.http.models import Filter, FieldCondition, MatchValue, PointS
 from pathlib import Path
 import threading
 import uuid
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="RAG Chat Bot with CRUD operation API",
               description="API for uploading pdf files in Qdrant DB that shows chunks, Gemini 2.5 flash LLm powered chat bot.",
@@ -20,7 +25,7 @@ app = FastAPI(title="RAG Chat Bot with CRUD operation API",
 
 reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
 qdrant_client = QdrantClient(host="localhost", port=6333) 
-session_memory: Dict[str, SlidingWindowSession] = {}
+# session_memory: Dict[str, SlidingWindowSession] = {}
 session_lock = threading.Lock()  # Thread-safe session management
 
 app.add_middleware(
@@ -33,9 +38,6 @@ app.add_middleware(
 
 UPLOAD_DIR = "uploaded_pdfs"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
-
-# Qdrant client
-qdrant_client = QdrantClient(host="localhost", port=6333)
 
 # --- 1. Upload PDF and get chunks ---
 @app.post("/upload_pdf/")
@@ -84,26 +86,19 @@ session_memory = {}
 @app.post("/chat/")
 async def chat_with_llm(user_msg: str, request: Request, pdf_name: Optional[str] = Query(None)):
     try:
-        # Use a session ID (e.g., from a header or cookie) instead of client IP
         session_id = request.headers.get("X-Session-ID", str(uuid.uuid4()))
-        
-        # Thread-safe session access
         with session_lock:
             session = session_memory.setdefault(session_id, SlidingWindowSession(max_turns=20))
 
-        # Validate input
         if not user_msg.strip():
             raise HTTPException(status_code=400, detail="User message cannot be empty")
 
-        # Embed user query
         query_vector = embed_model.encode(user_msg).tolist()
 
-        # Prepare Qdrant filter
         qdrant_filter = None
         if pdf_name and pdf_name.strip():
             qdrant_filter = Filter(must=[FieldCondition(key="source", match=MatchValue(value=pdf_name))])
 
-        # Search Qdrant
         results = qdrant_client.search(
             collection_name="rag_chunks",
             query_vector=query_vector,
@@ -111,15 +106,28 @@ async def chat_with_llm(user_msg: str, request: Request, pdf_name: Optional[str]
             with_payload=True,
             query_filter=qdrant_filter
         )
+
         top_chunks = []
         references = []
         context = ""
-        # Rerank results if any
+
+        # ✅ Log raw Qdrant results (no reranking)
+        logger.info("📦 Top 5 results WITHOUT rerank:")
+        for r in results[:5]:
+            raw_text = r.payload.get("text", "")[:100].replace("\n", " ")
+            logger.info(f"Text: {raw_text} | Page: {r.payload.get('page')} | Source: {r.payload.get('source')}")
+
+        # ✅ Apply reranker
         if results:
             pairs = [(user_msg, r.payload["text"]) for r in results]
             scores = reranker.predict(pairs)
             ranked = sorted(zip(results, scores), key=lambda x: x[1], reverse=True)
-            
+
+            logger.info("🏅 Top reranked results:")
+            for i, (r, score) in enumerate(ranked[:5]):
+                preview = r.payload.get("text", "")[:100].replace("\n", " ")
+                logger.info(f"#{i+1}: Score={score:.4f} | Text: {preview} | Page: {r.payload.get('page')} | Source: {r.payload.get('source')}")
+
             Threshold = 0.3
             for (r, score) in ranked[:5]:
                 if score < Threshold:
@@ -130,24 +138,24 @@ async def chat_with_llm(user_msg: str, request: Request, pdf_name: Optional[str]
                 top_chunks.append(f"{text}\n(Source: {source}, Page: {page})")
                 references.append(f"{source} (Page {page})")
 
-            context = "\n\n".join(top_chunks)
+            context = "\n---\n".join(top_chunks)
 
-        # Generate response
+        print("User message:" ,user_msg)
+        # LLM stuff
         gemini = GeminiChat()
         response = gemini.generate_response(
-            user_input=user_msg,
+            user_input=user_msg + str(ranked),
             context=context,
             chat_history=session.get_messages({"USER": "user", "ASSISTANT": "assistant"})
         )
 
-        # Store in session
         with session_lock:
             session.add_turn(user_msg, response)
 
         return {
             "response": response.strip(),
             "source": references
-            }
+        }
 
     except ValueError as ve:
         raise HTTPException(status_code=400, detail=str(ve))
@@ -155,6 +163,7 @@ async def chat_with_llm(user_msg: str, request: Request, pdf_name: Optional[str]
         raise HTTPException(status_code=500, detail=str(re))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
+
 
 # --- 3. List PDFs in DB ---
 @app.get("/pdfs/")

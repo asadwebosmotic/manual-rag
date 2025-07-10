@@ -10,65 +10,72 @@ class GeminiChat:
             genai.configure(api_key=settings.GEMINI_API_KEY)
             GeminiChat._model = genai.GenerativeModel(model_name)
         self.model = GeminiChat._model
-        self.prompt_template = """You are a helpful, smart and professional assistant.
-        - Use the document context and chat history to answer the user's question in a clearly structured way. 
-        - Respond in fluent, natural English, with no Markdown formatting, no newlines, no bolding, and no bullet points.
-        - Keep your reply concise, neatly structured into 1-3 natural paragraphs.
-        - The tone should be friendly and engaging, but clean and professional.
-        
-        If no document context is provided, answer using your general knowledge in a similarly clean and structured way with wit and genz like cool touch.
+
+        # Updated prompt with stronger instructions + few-shot example
+        self.prompt_template = """You are a helpful, smart assistant who uses the given document context and chat history to answer user questions.
+
+        NEVER ignore the provided context. If no context is available, respond using your general knowledge — but indicate that you're not using document information.
+
+        Here’s how to behave:
+
+        Example:
+        User: Who is Batman?
+        Assistant: Batman is a superhero from DC Comics...
+        User: Who are his allies?
+        Assistant: Batman’s allies include Robin, Alfred Pennyworth, Batgirl...
 
         ---
-        Context:
-        {context}
 
-        Chat History:
+        Chat so far:
         {history}
 
-        User Question:
-        {user_input}"""
+        Relevant document excerpts:
+        {context}
 
-    def generate_response(self, user_input: str, context: Optional[str] = None, 
-                        chat_history: Optional[List[Dict]] = None) -> str:
+        Current User Question:
+        {user_input}
+
+        Now respond as the assistant:"""
+
+    def generate_response(
+        self,
+        user_input: str,
+        context: Optional[str] = None,
+        chat_history: Optional[List[Dict]] = None
+    ) -> str:
         """
-        Generates a response from Gemini using context and sliding chat history.
-        
-        Args:
-            user_input: Current user query.
-            context: Retrieved context from Qdrant (RAG chunks).
-            chat_history: Sliding window of recent chat turns.
-        
-        Returns:
-            str: LLM-generated response.
-        
-        Raises:
-            ValueError: If input parameters are invalid.
-            RuntimeError: If Gemini API call fails.
+        Generates a response from Gemini using document context and chat memory.
         """
+
         try:
-            # Validate inputs
-            if not user_input:
+            if not user_input.strip():
                 raise ValueError("User input cannot be empty")
 
-            # Format chat history
+            # Format chat history as a readable back-and-forth
             history_str = ""
             if chat_history:
                 for turn in chat_history:
                     role = "User" if turn["role"].upper() == "USER" else "Assistant"
-                    history_str += f"{role}: {turn['content']}\n"
+                    history_str += f"{role}: {turn['content'].strip()}\n"
+            else:
+                history_str = "No prior conversation."
 
-            # Build prompt
+            # Build the full prompt
             prompt = self.prompt_template.format(
-                context=context or "No context provided",
-                history=history_str or "No history yet.",
-                user_input=user_input
+                context=context.strip() if context else "No relevant context retrieved.",
+                history=history_str.strip(),
+                user_input=user_input.strip()
             )
 
-            # Generate response
+            print("🧠 FINAL PROMPT SENT TO GEMINI:\n", prompt[:1000])  # Preview first 1000 chars
+
+            # Generate response from Gemini
             response = self.model.generate_content(prompt)
+
             if not response.text:
                 raise RuntimeError("Empty response from Gemini API")
-            return response.text
+
+            return response.text.strip()
 
         except genai.APIError as e:
             raise RuntimeError(f"Gemini API error: {str(e)}")
