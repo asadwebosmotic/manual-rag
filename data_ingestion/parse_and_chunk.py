@@ -1,138 +1,57 @@
 import os
-import re #regex
+import re
 from typing import List, Dict
 import pdfplumber
-from hashlib import md5 #hashing
-import logging # to see what is going on
-from langchain_community.document_loaders import PDFPlumberLoader
+from hashlib import md5
+import logging
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def parse_file(filepath: str) -> List[Dict]: # List of parsed pages(text+tables+metadata)
+def parse_file(filepath: str) -> List[Dict]:
     if os.path.splitext(filepath)[1].lower() != ".pdf":
         raise ValueError("Unsupported file type")
 
-    pages = []
-    total_pages = 0
+    pages_data = []
+    
+    # Use pdfplumber directly as it's more reliable for complex layouts and OCR
     with pdfplumber.open(filepath) as pdf:
-        total_pages = len(pdf.pages)
-    logger.info(f"Total pages in PDF: {total_pages}")
+        logger.info(f"Total pages in PDF: {len(pdf.pages)}")
+        
+        for i, page in enumerate(pdf.pages):
+            page_num = i + 1
+            
+            # 1. Attempt standard text extraction
+            text = page.extract_text()
 
-    try:
-        # Try using PDFPlumberLoader with OCR for scanned documents
-        loader = PDFPlumberLoader(filepath, extract_images=True)
-        documents = loader.load()
-        logger.info(f"PDFPlumberLoader extracted {len(documents)} pages")
+            # 2. If standard extraction fails, use OCR as a fallback
+            if not text or len(text.strip()) < 50: # The threshold helps catch partial failures
+                logger.warning(f"Standard text extraction yielded little or no text for page {page_num}. Attempting OCR.")
+                try:
+                    # pdfplumber.to_image().ocr() requires pytesseract and its dependencies
+                    text = page.to_image(resolution=300).ocr()
+                    logger.info(f"Successfully extracted text with OCR from page {page_num}. Text length: {len(text)}")
+                except Exception as ocr_error:
+                    logger.error(f"OCR failed for page {page_num}: {ocr_error}")
+                    text = "" # Ensure text is empty if OCR fails
 
-        # Create a map of page numbers to content
-        page_content_map = {doc.metadata.get("page", 1): doc.page_content or "" for doc in documents}
+            # 3. Extract tables
+            tables = page.extract_tables() or []
 
-        # Process each page, ensuring all pages are included
-        for page_num in range(1, total_pages + 1):
-            text = page_content_map.get(page_num, "")
-            logger.info(f"Processing page {page_num} with PDFPlumberLoader text length: {len(text)}")
+            # Clean up text for better processing
+            cleaned_text = "\n".join(line.strip() for line in (text or "").splitlines() if line.strip())
 
-            # Clean up excessive newlines and spaces
-            text = "\n".join(line.strip() for line in text.splitlines() if line.strip())
-
-            # Use pdfplumber for table extraction
-            with pdfplumber.open(filepath) as pdf:
-                if page_num <= len(pdf.pages):
-                    page = pdf.pages[page_num - 1]  # pdfplumber is 0-indexed
-                    tables = page.extract_tables() or []
-                    table_texts = []
-                    table_bboxes = []
-                    found_tables = page.find_tables()
-                    for table, table_obj in zip(tables, found_tables):
-                        table_text = "\n".join(" ".join(str(cell) if cell is not None else "" for cell in row) for row in table)
-                        table_texts.append(table_text)
-                        table_bboxes.append(table_obj.bbox if table_obj else None)
-
-                    # Filter out text within table regions
-                    if text and table_bboxes:
-                        def filter_non_table(obj):
-                            for bbox in table_bboxes:
-                                if bbox and obj.get('x0', float('inf')) >= bbox[0] and obj.get('x1', 0) <= bbox[2] and \
-                                   obj.get('top', float('inf')) >= bbox[1] and obj.get('bottom', 0) <= bbox[3]:
-                                    return False
-                            return True
-                        filtered_page = page.filter(filter_non_table)
-                        filtered_text = filtered_page.extract_text() or ""
-                        for table_text in table_texts:
-                            filtered_text = filtered_text.replace(table_text, "")
-                        text = "\n".join(line.strip() for line in filtered_text.splitlines() if line.strip())
-
-                    pages.append({
-                        "text": text,
-                        "tables": tables,
-                        "metadata": {
-                            "page_number": page_num,
-                            "source": os.path.basename(filepath)
-                        }
-                    })
-                else:
-                    logger.warning(f"Page {page_num} out of range for pdfplumber")
-
-        # Check if all pages were processed
-        if len(pages) < total_pages:
-            logger.warning(f"PDFPlumberLoader missed {total_pages - len(pages)} pages, falling back to pdfplumber for missing pages")
-
-    except Exception as e:
-        logger.warning(f"PDFPlumberLoader failed: {str(e)}. Falling back to pdfplumber for all pages.")
-
-    # Fallback to pdfplumber for missing pages or if PDFPlumberLoader failed
-    if len(pages) < total_pages:
-        with pdfplumber.open(filepath) as pdf:
-            for page_num in range(1, total_pages + 1):
-                if page_num not in [p["metadata"]["page_number"] for p in pages]:
-                    page = pdf.pages[page_num - 1]
-                    tables = page.extract_tables() or []
-                    table_texts = []
-                    table_bboxes = []
-                    found_tables = page.find_tables()
-                    for table, table_obj in zip(tables, found_tables):
-                        table_text = "\n".join(" ".join(str(cell) if cell is not None else "" for cell in row) for row in table)
-                        table_texts.append(table_text)
-                        table_bboxes.append(table_obj.bbox if table_obj else None)
-
-                    text = page.extract_text()
-                    if not text:  # Try OCR with pdfplumber for scanned pages
-                        try:
-                            images = page.images
-                            if images:
-                                # Convert first image to text using pdfplumber's OCR (requires pytesseract)
-                                text = page.to_image().ocr().text or ""
-                                logger.info(f"Extracted OCR text for page {page_num} using pdfplumber")
-                        except Exception as ocr_e:
-                            logger.warning(f"pdfplumber OCR failed for page {page_num}: {str(ocr_e)}")
-                            text = ""
-
-                    if text and table_bboxes:
-                        def filter_non_table(obj):
-                            for bbox in table_bboxes:
-                                if bbox and obj.get('x0', float('inf')) >= bbox[0] and obj.get('x1', 0) <= bbox[2] and \
-                                   obj.get('top', float('inf')) >= bbox[1] and obj.get('bottom', 0) <= bbox[3]:
-                                    return False
-                            return True
-                        filtered_page = page.filter(filter_non_table)
-                        filtered_text = filtered_page.extract_text() or text
-                        for table_text in table_texts:
-                            filtered_text = filtered_text.replace(table_text, "")
-                        text = "\n".join(line.strip() for line in filtered_text.splitlines() if line.strip())
-
-                    pages.append({
-                        "text": text,
-                        "tables": tables,
-                        "metadata": {
-                            "page_number": page_num,
-                            "source": os.path.basename(filepath)
-                        }
-                    })
-                    logger.info(f"Fallback: Processed page {page_num} with pdfplumber")
-
-    return pages
+            pages_data.append({
+                "text": cleaned_text,
+                "tables": tables,
+                "metadata": {
+                    "page_number": page_num,
+                    "source": os.path.basename(filepath)
+                }
+            })
+            
+    return pages_data
 
 def create_table_chunk(table: Dict, source: str) -> List[Dict]:
     header = table["header"]
